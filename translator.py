@@ -1,16 +1,30 @@
-from PyQt5.QtWidgets import QMainWindow, QLabel, QTextEdit, QVBoxLayout, QWidget, QComboBox, QAction, QFileDialog
-from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import (QMainWindow, QLabel, QTextEdit, QVBoxLayout, QWidget, QComboBox, QAction,
+                             QFileDialog, QCheckBox)
+from PyQt5.QtCore import QTimer, QRunnable, QThreadPool, pyqtSlot, QObject, pyqtSignal
 from googletrans import Translator
+from translation_worker import TranslationWorker
 
 
 class TranslatorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.translate_button = None
+        self.thread_pool = QThreadPool()
+        self.timer = None
         self.dest_lang = None
-        self.src_lang = None
-        self.output_text = None
+        self.src_lang_label = None
         self.input_text = None
+        self.output_text = None
+        self.src_lang = None
+        self.auto_detect_checkbox = None
+        self.languages = ["English", "Spanish", "French", "German", "Chinese", "Japanese"]
+        self.language_map = {
+            "English": "en",
+            "Spanish": "es",
+            "French": "fr",
+            "German": "de",
+            "Chinese": "zh-cn",
+            "Japanese": "ja"
+        }
         self.translator = Translator()
         self.initUI()
 
@@ -40,21 +54,27 @@ class TranslatorApp(QMainWindow):
         self.output_text.setReadOnly(True)
         layout.addWidget(self.output_text)
 
-        # Language selection
+        # Source language label and combobox
+        self.src_lang_label = QLabel("Source Language:", self)
+        layout.addWidget(self.src_lang_label)
+
         self.src_lang = QComboBox(self)
-        self.src_lang.addItems(["English", "Spanish", "French", "German", "Chinese", "Japanese"])
+        self.src_lang.addItems(self.languages)
         self.src_lang.setCurrentText("English")
         layout.addWidget(self.src_lang)
 
+        # Destination language combobox
         self.dest_lang = QComboBox(self)
-        self.dest_lang.addItems(["English", "Spanish", "French", "German", "Chinese", "Japanese"])
+        self.dest_lang.addItems(self.language_map.keys())
         self.dest_lang.setCurrentText("Spanish")
         layout.addWidget(self.dest_lang)
 
-        # # Translate button
-        # self.translate_button = QPushButton("Translate", self)
-        # self.translate_button.clicked.connect(self.perform_translation)
-        # layout.addWidget(self.translate_button)
+        # Auto-detect language checkbox
+        self.auto_detect_checkbox = QCheckBox("Auto-detect source language", self)
+        self.auto_detect_checkbox.setChecked(False)
+        self.toggle_auto_detect()
+        self.auto_detect_checkbox.stateChanged.connect(self.toggle_auto_detect)
+        layout.addWidget(self.auto_detect_checkbox)
 
         # Set layout to the central widget
         central_widget.setLayout(layout)
@@ -62,10 +82,9 @@ class TranslatorApp(QMainWindow):
         # Menu bar
         self.create_menu()
 
-        # Timer for automatic translation
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.perform_translation)
-        self.timer.start(1000)  # 1 second interval
+        self.timer.start(1000)
 
     def create_menu(self):
         menu_bar = self.menuBar()
@@ -100,16 +119,59 @@ class TranslatorApp(QMainWindow):
             with open(file_name, 'w', encoding='utf-8') as file:
                 file.write(self.output_text.toPlainText())
 
+    def detect_language(self, text):
+        try:
+            detection = self.translator.detect(text)
+            return detection.lang  # Returns the detected language code (e.g., 'en', 'es')
+        except Exception as e:
+            print(f"Language detection error: {e}")
+            return None
+
     def translate_text(self, text, src_lang, dest_lang):
-        translation = self.translator.translate(text, src=src_lang, dest=dest_lang)
-        return translation.text
+        try:
+            translation = self.translator.translate(text, src=src_lang, dest=dest_lang)
+            return translation.text
+        except Exception as e:
+            print(f"Translation error: {e}")
+            return "Translation failed."
 
     def perform_translation(self):
         text = self.input_text.toPlainText().strip()
         if not text:
             self.output_text.setPlainText("")
             return
-        src = self.src_lang.currentText()
-        dest = self.dest_lang.currentText()
-        translated_text = self.translate_text(text, src, dest)
+
+        # Determine source language
+        if self.auto_detect_checkbox.isChecked():
+            detected_lang = self.detect_language(text)
+            if detected_lang:
+                src_lang = detected_lang
+            else:
+                src_lang = 'en'  # Default to English if detection fails
+                print("Language detection failed, defaulting to English.")
+        else:
+            src_lang = self.src_lang.currentText()
+
+        dest_lang = self.language_map[self.dest_lang.currentText()]  # Get the correct language code
+
+        # Perform translation
+        worker = TranslationWorker(text, src_lang, dest_lang, self.translator)
+        worker.signals.result.connect(self.display_translation)
+        worker.signals.error.connect(self.display_error)
+
+        self.thread_pool.start(worker)
+
+    def toggle_auto_detect(self):
+        """Toggle the label of source language based on auto-detect status."""
+        if self.auto_detect_checkbox.isChecked():
+            self.src_lang_label.setText("Language detected automatically")
+            self.src_lang.setEnabled(False)  # Disable manual selection when auto-detect is on
+        else:
+            self.src_lang_label.setText("Source Language:")
+            self.src_lang.setEnabled(True)  # Enable manual selection when auto-detect is off
+
+    def display_translation(self, translated_text):
         self.output_text.setPlainText(translated_text)
+
+    def display_error(self, error_message):
+        self.output_text.setPlainText(error_message)
